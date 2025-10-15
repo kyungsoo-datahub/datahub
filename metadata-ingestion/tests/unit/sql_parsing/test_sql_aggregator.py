@@ -11,6 +11,7 @@ from datahub.configuration.datetimes import parse_user_datetime
 from datahub.configuration.time_window_config import BucketDuration, get_time_bucket
 from datahub.ingestion.sink.file import write_metadata_file
 from datahub.ingestion.source.usage.usage_common import BaseUsageConfig
+from datahub.metadata import schema_classes as models
 from datahub.metadata.urns import CorpUserUrn, DatasetUrn
 from datahub.sql_parsing.sql_parsing_aggregator import (
     KnownQueryLineageInfo,
@@ -1132,3 +1133,91 @@ def test_diamond_problem(pytestconfig: pytest.Config, tmp_path: pathlib.Path) ->
         pytestconfig.rootpath
         / "tests/unit/sql_parsing/aggregator_goldens/test_diamond_problem_golden.json",
     )
+
+
+@freeze_time(FROZEN_TIME)
+def test_empty_column_in_snowflake_lineage() -> None:
+    """Test that column lineage with empty string column names doesn't cause errors."""
+    aggregator = SqlParsingAggregator(
+        platform="snowflake",
+        generate_lineage=True,
+        generate_usage_statistics=False,
+        generate_operations=False,
+    )
+
+    downstream_urn = DatasetUrn("snowflake", "dev.public.target_table").urn()
+    upstream_urn = DatasetUrn("snowflake", "dev.public.source_table").urn()
+
+    # Simulate Snowflake query with column lineage that includes empty string columns
+    known_query_lineage = KnownQueryLineageInfo(
+        query_text="insert into target_table (col_a, col_b, col_c) select col_a, col_b, col_c from source_table",
+        downstream=downstream_urn,
+        upstreams=[upstream_urn],
+        column_lineage=[
+            ColumnLineageInfo(
+                downstream=DownstreamColumnRef(table=downstream_urn, column="col_a"),
+                upstreams=[ColumnRef(table=upstream_urn, column="col_a")],
+            ),
+            ColumnLineageInfo(
+                downstream=DownstreamColumnRef(table=downstream_urn, column="col_b"),
+                upstreams=[
+                    ColumnRef(table=upstream_urn, column="col_b"),
+                    ColumnRef(table=upstream_urn, column=""),
+                ],
+            ),
+            ColumnLineageInfo(
+                downstream=DownstreamColumnRef(table=downstream_urn, column="col_c"),
+                upstreams=[
+                    ColumnRef(table=upstream_urn, column=""),
+                ],
+            ),
+        ],
+        timestamp=_ts(20),
+        query_type=QueryType.INSERT,
+    )
+
+    aggregator.add_known_query_lineage(known_query_lineage)
+
+    # This should not raise an error even with empty string columns
+    mcps = list(aggregator.gen_metadata())
+
+    # Verify that lineage was generated
+    lineage_mcps = [mcp for mcp in mcps if mcp.aspectName == "upstreamLineage"]
+    assert len(lineage_mcps) == 1
+
+    # Verify that the lineage contains the upstream
+    upstream_lineage = lineage_mcps[0].aspect
+    assert isinstance(upstream_lineage, models.UpstreamLineageClass)
+    assert len(upstream_lineage.upstreams) == 1
+    assert upstream_lineage.upstreams[0].dataset == upstream_urn
+
+    # Verify that fine-grained lineage exists
+    assert upstream_lineage.fineGrainedLineages is not None
+    # Only col_a and col_b should have lineage (col_c has only empty string columns, so no lineage)
+    assert len(upstream_lineage.fineGrainedLineages) == 2
+
+    # Check that column 'col_a' has one upstream
+    col_a_lineage = [
+        fgl
+        for fgl in upstream_lineage.fineGrainedLineages
+        if fgl.downstreams and fgl.downstreams[0].endswith("col_a)")
+    ]
+    assert len(col_a_lineage) == 1
+    assert col_a_lineage[0].upstreams and len(col_a_lineage[0].upstreams) == 1
+
+    # Check that column 'col_b' has only one upstream (the empty string column should be filtered out)
+    col_b_lineage = [
+        fgl
+        for fgl in upstream_lineage.fineGrainedLineages
+        if fgl.downstreams and fgl.downstreams[0].endswith("col_b)")
+    ]
+    assert len(col_b_lineage) == 1
+    assert col_b_lineage[0].upstreams and len(col_b_lineage[0].upstreams) == 1
+
+    # Check that column 'col_c' has NO lineage (all upstreams were empty strings and filtered out)
+    col_c_lineage = [
+        fgl
+        for fgl in upstream_lineage.fineGrainedLineages
+        if fgl.downstreams and fgl.downstreams[0].endswith("col_c)")
+    ]
+    assert len(col_c_lineage) == 0
