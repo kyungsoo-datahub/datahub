@@ -1136,7 +1136,9 @@ def test_diamond_problem(pytestconfig: pytest.Config, tmp_path: pathlib.Path) ->
 
 
 @freeze_time(FROZEN_TIME)
-def test_empty_column_in_snowflake_lineage() -> None:
+def test_empty_column_in_snowflake_lineage(
+    pytestconfig: pytest.Config, tmp_path: pathlib.Path
+) -> None:
     """Test that column lineage with empty string column names doesn't cause errors."""
     aggregator = SqlParsingAggregator(
         platform="snowflake",
@@ -1148,7 +1150,6 @@ def test_empty_column_in_snowflake_lineage() -> None:
     downstream_urn = DatasetUrn("snowflake", "dev.public.target_table").urn()
     upstream_urn = DatasetUrn("snowflake", "dev.public.source_table").urn()
 
-    # Simulate Snowflake query with column lineage that includes empty string columns
     known_query_lineage = KnownQueryLineageInfo(
         query_text="insert into target_table (col_a, col_b, col_c) select col_a, col_b, col_c from source_table",
         downstream=downstream_urn,
@@ -1178,46 +1179,13 @@ def test_empty_column_in_snowflake_lineage() -> None:
 
     aggregator.add_known_query_lineage(known_query_lineage)
 
-    # This should not raise an error even with empty string columns
-    mcps = list(aggregator.gen_metadata())
+    mcpws = [mcp for mcp in aggregator.gen_metadata()]
+    lineage_mcpws = [mcpw for mcpw in mcpws if mcpw.aspectName == "upstreamLineage"]
+    out_path = tmp_path / "mcpw.json"
+    write_metadata_file(out_path, lineage_mcpws)
 
-    # Verify that lineage was generated
-    lineage_mcps = [mcp for mcp in mcps if mcp.aspectName == "upstreamLineage"]
-    assert len(lineage_mcps) == 1
-
-    # Verify that the lineage contains the upstream
-    upstream_lineage = lineage_mcps[0].aspect
-    assert isinstance(upstream_lineage, models.UpstreamLineageClass)
-    assert len(upstream_lineage.upstreams) == 1
-    assert upstream_lineage.upstreams[0].dataset == upstream_urn
-
-    # Verify that fine-grained lineage exists
-    assert upstream_lineage.fineGrainedLineages is not None
-    # Only col_a and col_b should have lineage (col_c has only empty string columns, so no lineage)
-    assert len(upstream_lineage.fineGrainedLineages) == 2
-
-    # Check that column 'col_a' has one upstream
-    col_a_lineage = [
-        fgl
-        for fgl in upstream_lineage.fineGrainedLineages
-        if fgl.downstreams and fgl.downstreams[0].endswith("col_a)")
-    ]
-    assert len(col_a_lineage) == 1
-    assert col_a_lineage[0].upstreams and len(col_a_lineage[0].upstreams) == 1
-
-    # Check that column 'col_b' has only one upstream (the empty string column should be filtered out)
-    col_b_lineage = [
-        fgl
-        for fgl in upstream_lineage.fineGrainedLineages
-        if fgl.downstreams and fgl.downstreams[0].endswith("col_b)")
-    ]
-    assert len(col_b_lineage) == 1
-    assert col_b_lineage[0].upstreams and len(col_b_lineage[0].upstreams) == 1
-
-    # Check that column 'col_c' has NO lineage (all upstreams were empty strings and filtered out)
-    col_c_lineage = [
-        fgl
-        for fgl in upstream_lineage.fineGrainedLineages
-        if fgl.downstreams and fgl.downstreams[0].endswith("col_c)")
-    ]
-    assert len(col_c_lineage) == 0
+    mce_helpers.check_golden_file(
+        pytestconfig,
+        out_path,
+        RESOURCE_DIR / "test_empty_column_in_snowflake_lineage_golden.json",
+    )
