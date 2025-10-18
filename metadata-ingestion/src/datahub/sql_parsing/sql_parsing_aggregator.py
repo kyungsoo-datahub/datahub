@@ -1341,6 +1341,15 @@ class SqlParsingAggregator(Closeable):
                 upstreams.setdefault(upstream, query.query_id)
 
             for lineage_info in query.column_lineage:
+                if (
+                    not lineage_info.downstream.column
+                    or not lineage_info.downstream.column.strip()
+                ):
+                    logger.debug(
+                        f"Skipping lineage entry with empty downstream column in query {query.query_id}"
+                    )
+                    continue
+
                 for upstream_ref in lineage_info.upstreams:
                     if upstream_ref.column:
                         cll[lineage_info.downstream.column].setdefault(
